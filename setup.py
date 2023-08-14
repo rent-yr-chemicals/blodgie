@@ -6,7 +6,7 @@ def main():
     setup(
         name='blodgie',
         version='0.0',
-        packages=('blodgie',),
+        scripts=['blodgie'],
         install_requires=['ikea_api','tabulate'],
     )
 
