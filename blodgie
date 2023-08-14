@@ -1,0 +1,175 @@
+#!/usr/bin/env python
+
+import requests
+import ikea_api
+from tabulate import tabulate
+
+BLODGIE = '90373590'
+SMOL_BLODGIE = '70540665'
+STORES = 'https://www.ikea.com/us/en/meta-data/navigation/stores-detailed.json'
+API_CONSTANTS = {
+    'country': 'us',
+    'language': 'en',
+}
+BLUSH = '\U0001f633'
+CRY = '\U0001f62d'
+
+class Stores(dict):
+
+    def __init__(self):
+        response = requests.get(STORES)
+        data = response.json()
+        dict.__init__(self, {store['id']: store for store in data})
+
+class Availabilities(list):
+
+    api = ikea_api
+    constants = api.Constants(**API_CONSTANTS)
+    stock = api.Stock(constants)
+
+    def __init__(self, item_name, item_id):
+        
+        self.endpoint = self.stock.get_stock(item_id)
+        self.item_name = item_name
+        self.item_id = item_id
+        self.availabilities = []
+
+        self.get()
+
+        list.__init__(self, self.availabilities)
+
+    def get(self, ignore_unknown=True):
+
+        response = self.api.run(self.endpoint)
+        results = response['availabilities']
+        self.availabilities = []
+
+        for data in results:
+            availability = Availability(self.item_name, self.item_id, data)
+            if availability.store_data or (ignore_unknown == False):
+                self.availabilities.append(availability)
+
+    def sort_quantity(self, reverse=True):
+        list.sort(self, key=lambda item: item.quantity, reverse=reverse)
+
+    def sort_location(self, reverse=False):
+        list.sort(self, key=lambda item: item.location, reverse=reverse)
+
+    def sort(self, key='quantity', reverse=False):
+        if key == 'quantity':
+            self.sort_quantity(reverse=not reverse)
+        elif key == 'location':
+            self.sort_location(reverse=reverse)
+        else:
+            list.sort(self, key=key, reverse=reverse)
+
+
+class Availability(dict):
+
+    store_db = Stores()
+
+    def __init__(self, item_name, item_id, data):
+        
+        dict.__init__(self, data)
+        
+        self.item_name = item_name
+        self.item_id = item_id
+
+        self.store_id = self['classUnitKey']['classUnitCode']
+        self.store_type = self['classUnitKey']['classUnitType']
+        self.store_data = self.store_db.get(self.store_id, None)
+
+        self.in_store = self.get('availableForCashCarry', False)
+        self.pick_up = self.get('availableForClickCollect', False)
+        self.delivery = self.get('availableForHomeDelivery', False)
+
+        self._store_name = None
+        self._location = None
+
+        if self.in_store:
+            self.quantity = self['buyingOption']['cashCarry']['availability']['quantity']
+        else:
+            self.quantity = 0
+
+    @property
+    def store_name(self):
+        
+        if self._store_name is not None:
+            return self._store_name
+
+        if self.location == (None,None):
+            self._store_name = '\U0001f633 Unknown location \U0001f633'
+        else:
+            state, city = self.location
+            self._store_name = f'{city}, {state}'
+
+        return self._store_name
+
+    @property
+    def location(self):
+        if self._location is not None:
+            return self._location
+
+        if self.store_data is None:
+            self._location = (None,None)
+        else:
+            self._location = (self.store_data['address']['stateProvinceCode'][2:],self.store_data['address']['city'])
+
+        return self._location
+
+    def format_quantity(self):
+        if not self.quantity:
+            return CRY
+        else:
+            return str(self.quantity)
+
+
+def find_all(*args):
+
+    print()
+
+    all_results = []
+    for arg in args:
+
+        item_name, item_id = arg
+        print(f'Finding {item_name}...')
+        results = Availabilities(item_name, item_id)
+        results.sort_location()
+        all_results.append(results)
+
+    joined = [[result[0].store_name] + [item.format_quantity() for item in result] for result in zip(*all_results)]
+
+    table = tabulate(
+        joined,
+        headers=['Store'] + [arg[0] for arg in args],
+        colalign=['left'] + ['right' for arg in args]
+    )
+    
+    print()
+    print(table)
+    print()
+
+def find(item_name, item_id, sort_key='location', sort_reverse=False):
+
+    print()
+    print(f'Finding {item_name}...')
+
+    results = Availabilities(item_name, item_id)
+    results.sort(key=sort_key, reverse=sort_reverse)
+    
+    table = tabulate(
+        [[result.store_name, result.format_quantity()] for result in results],
+        headers=['Store', item_name],
+        colalign=['left','right']
+    )
+    
+    print()
+    print(table)
+    print()
+
+def main():
+
+    find_all(('Blodgie', BLODGIE), ('Smol Blodgie', SMOL_BLODGIE))
+
+if __name__ == '__main__':
+    main()
