@@ -1,11 +1,23 @@
 #!/usr/bin/env python
 
+import sys
+import argparse
 import requests
+import geopy.distance
+from collections import namedtuple
+
 import ikea_api
 from tabulate import tabulate
 
-BLODGIE = '90373590'
-SMOL_BLODGIE = '70540665'
+Coord = namedtuple('Coord', ['lat','lng'])
+Product = namedtuple('Product', ['name', 'id'])
+
+BLODGIE = Product('Blodgie','90373590')
+SMOL_BLODGIE = Product('Smol Blodgie', '70540665')
+ALL = [
+    BLODGIE,
+    SMOL_BLODGIE
+]
 STORES = 'https://www.ikea.com/us/en/meta-data/navigation/stores-detailed.json'
 API_CONSTANTS = {
     'country': 'us',
@@ -13,163 +25,371 @@ API_CONSTANTS = {
 }
 BLUSH = '\U0001f633'
 CRY = '\U0001f62d'
+BOTTOM = '\U0001f97a'
+BOTTOM_HANDS= '\U0001f449\U0001f448'
 
-class Stores(dict):
+# 1. Get store data
+# 2. Select product to query
+# 3. Get inventory data for each product
+# 4. Select stores to display
+# 5. Process and sort results
+# 6. Display results
 
-    def __init__(self):
-        response = requests.get(STORES)
-        data = response.json()
-        dict.__init__(self, {store['id']: store for store in data})
+class Store(object):
 
-class Availabilities(list):
+    def __init__(self, data):
+
+        self.id = data['id']
+        self.name = data['name']
+        self.address = data['address']
+        self.city = self.address['city']
+        self.state = self.address['stateProvinceCode'][2:]
+        self.coord = Coord(float(data['lat']), float(data['lng']))
+
+        self.products = []
+        self.inventory = {}
+
+    def add_product(self, product, data):
+        self.inventory[product] = data
+        self.products = list(self.inventory.keys())
+
+    def __str__(self):
+
+        return f'{self.city}, {self.state}:'
+
+class InventoryChecker(object):
 
     api = ikea_api
     constants = api.Constants(**API_CONSTANTS)
     stock = api.Stock(constants)
 
-    def __init__(self, item_name, item_id):
+    def __init__(self, location=(0,0)):
+        self.stores = self.get_stores()
+        self.products = []
+        self.location = Coord(*location)
+        self._sort = lambda x: True
+        self.selector = Selector(location=self.location)
+        self.sort = SortKeyFactory(location=self.location)
+
+    def get_stores(self):
+        response = requests.get(STORES)
+        data = response.json()
+        return [Store(store) for store in data]
+
+    def check_product(self, product):
+
+        endpoint = self.stock.get_stock(product.id)
+        api_response = self.api.run(endpoint)
+        inventory_results = {
+            result['classUnitKey']['classUnitCode']: result for result in api_response['availabilities']
+        }
+
+        for store in self.stores:
+            inventory_result = InventoryResult(product, inventory_results[store.id])
+            store.add_product(product, inventory_result)
+
+        try:
+            self.products = self.stores[0].products
+        except IndexError:
+            self.products = []
+
+    def select(self, products=None, reverse=False):
         
-        self.endpoint = self.stock.get_stock(item_id)
-        self.item_name = item_name
-        self.item_id = item_id
-        self.availabilities = []
+        if products is None:
+            products = self.products
 
-        self.get()
+        sorted_stores = sorted(self.stores, key=self.sort, reverse=reverse)
+        
+        results = []
+        
+        for store in sorted_stores:
+            if self.selector(store):
+                entry = (store,) + tuple(store.inventory[product] for product in products)
+                results.append(entry)
+        
+        return results
 
-        list.__init__(self, self.availabilities)
+    def show(self, products=None, reverse=False):
 
-    def get(self, ignore_unknown=True):
+        if products is None:
+            products = self.products
+        
+        results = self.select(products=products, reverse=reverse)
+        table = tabulate(
+            results,
+            headers=['Store'] + [product.name for product in products],
+            colalign=['left'] + ['right' for product in products]
+        )
 
-        response = self.api.run(self.endpoint)
-        results = response['availabilities']
-        self.availabilities = []
+        print(table)
 
-        for data in results:
-            availability = Availability(self.item_name, self.item_id, data)
-            if availability.store_data or (ignore_unknown == False):
-                self.availabilities.append(availability)
+class FunctionFactory(object):
+    
+    def __init__(self, location=(0,0)):
+        self.location = Coord(*location)
+        self.reset()
 
-    def sort_quantity(self, reverse=True):
-        list.sort(self, key=lambda item: item.quantity, reverse=reverse)
-
-    def sort_location(self, reverse=False):
-        list.sort(self, key=lambda item: item.location, reverse=reverse)
-
-    def sort(self, key='quantity', reverse=False):
-        if key == 'quantity':
-            self.sort_quantity(reverse=not reverse)
-        elif key == 'location':
-            self.sort_location(reverse=reverse)
+    def __call__(self, arg):
+        if self._func is not None:
+            return self._func(arg)
         else:
-            list.sort(self, key=key, reverse=reverse)
+            return True
 
+    def reset(self):
+        self._func = None
 
-class Availability(dict):
+    def add(self, obj):
+        '''override me uwu'''
+        pass
 
-    store_db = Stores()
+    def custom(self, func):
+        self.add(func)
 
-    def __init__(self, item_name, item_id, data):
+class Selector(FunctionFactory):
+
+    def reset(self):
+        FunctionFactory.reset(self)
+        self._add_mode = 'and'
+
+    def add(self, func):
+        if self._func is not None:
+            old_func = self._func
+            if self._add_mode == 'and':
+                self._func = lambda arg: old_func(arg) and func(arg)
+            elif self._add_mode == 'or':
+                self._func = lambda arg: old_func(arg) or func(arg)
+        else:
+            self._func = func
+
+    def mode(self, mode):
+        if mode.lower() not in ('and', 'or'):
+            raise ValueError
+        else:
+            self._add_mode = mode.lower()
+
+    def state(self, state):
+        self.add(lambda store: store.state.lower() == state.upper())
+
+    def city(self, city):
+        self.add(lambda store: store.city.lower() == city.lower())
+
+    def distance(self, distance):
+        self.add(lambda store: geopy.distance.distance(store.coord, self.location).mi <= distance)
+
+    def available(self, product, amount=0):
+        self.add(lambda store: store.inventory[product].quantity > amount)
+
+    def unavailable(self, product, amount=0):
+        self.add(lambda store: store.inventory[product].quantity <= amount)
+
+class SortKeyFactory(FunctionFactory):
+
+    def add(self, func):
+        if self._func is not None:
+            old_func = self._func
+            self._func = lambda arg: (func(arg),) + old_func(arg)
+        else:
+            self._func = lambda arg: (func(arg),)
+
+    def product(self, key, reverse=False):
+        def func(store):
+            nonlocal key
+            if isinstance(key, int):
+                key = store.products[key]
+            if reverse:
+                return store.inventory[key].quantity
+            else:
+                return -store.inventory[key].quantity
+        self.add(func)
         
-        dict.__init__(self, data)
-        
-        self.item_name = item_name
-        self.item_id = item_id
+    def state(self):
+        self.add(lambda store: store.state)
 
-        self.store_id = self['classUnitKey']['classUnitCode']
-        self.store_type = self['classUnitKey']['classUnitType']
-        self.store_data = self.store_db.get(self.store_id, None)
+    def city(self):
+        self.add(lambda store: store.city)
 
-        self.in_store = self.get('availableForCashCarry', False)
-        self.pick_up = self.get('availableForClickCollect', False)
-        self.delivery = self.get('availableForHomeDelivery', False)
+    def distance(self, reverse=False):
+        if reverse:
+            self.add(lambda store: -geopy.distance.distance(store.coord, self.location).mi)
+        else:
+            self.add(lambda store: geopy.distance.distance(store.coord, self.location).mi)
 
-        self._store_name = None
-        self._location = None
+
+class InventoryResult(object):
+
+    def __init__(self, product, data):
+                
+        self.product = product
+
+        self.in_store = data.get('availableForCashCarry', False)
+        self.pick_up = data.get('availableForClickCollect', False)
+        self.delivery = data.get('availableForHomeDelivery', False)
 
         if self.in_store:
-            self.quantity = self['buyingOption']['cashCarry']['availability']['quantity']
+            self.quantity = data['buyingOption']['cashCarry']['availability']['quantity']
         else:
             self.quantity = 0
 
-    @property
-    def store_name(self):
-        
-        if self._store_name is not None:
-            return self._store_name
-
-        if self.location == (None,None):
-            self._store_name = '\U0001f633 Unknown location \U0001f633'
-        else:
-            state, city = self.location
-            self._store_name = f'{city}, {state}'
-
-        return self._store_name
-
-    @property
-    def location(self):
-        if self._location is not None:
-            return self._location
-
-        if self.store_data is None:
-            self._location = (None,None)
-        else:
-            self._location = (self.store_data['address']['stateProvinceCode'][2:],self.store_data['address']['city'])
-
-        return self._location
-
-    def format_quantity(self):
+    def __str__(self):
         if not self.quantity:
             return CRY
         else:
             return str(self.quantity)
 
+class BlodgieParse(argparse.Action):
 
-def find_all(*args):
+    def string_to_product(value):
+        if value not in ('BLODGIE', 'SMOL_BLODGIE'):
+            raise NameError
+        else:
+            return eval(value)
 
-    print()
+    def string_to_bool(value):
+        if value.lower() not in ('true', 'false', 't', 'f'):
+            raise NameError
+        else:
+            if value.lower() in ('true', 't'):
+                return True
+            else:
+                return False
 
-    all_results = []
-    for arg in args:
+class ProductParse(BlodgieParse):
 
-        item_name, item_id = arg
-        print(f'Finding {item_name}...')
-        results = Availabilities(item_name, item_id)
-        results.sort_location()
-        all_results.append(results)
+    def __call__(self, parser, args, values, option_string=None):
+        if values == 'ALL':
+            products = ALL
+        else:
+            products = [self.string_to_product(value) for value in values.split(',')]
+        setattr(args, self.dest, products)
 
-    joined = [[result[0].store_name] + [item.format_quantity() for item in result] for result in zip(*all_results)]
+class FunctionFactoryParse(BlodgieParse):
 
-    table = tabulate(
-        joined,
-        headers=['Store'] + [arg[0] for arg in args],
-        colalign=['left'] + ['right' for arg in args]
-    )
-    
-    print()
-    print(table)
-    print()
+    parse_actions = {}    
 
-def find(item_name, item_id, sort_key='location', sort_reverse=False):
+    def __call__(self, parser, args, values, option_string=None):
+        parts = values.split(';')
+        result = []
+        for item in parts:
+            subparts = item.split(':')
+            func_name = subparts[0].strip()
+            item_args = subparts[1:]
+            if item_args:
+                parse_funcs = self.parse_actions[func_name]
+                parsed = tuple(parse_func(arg.strip()) for arg, parse_func in zip(item_args, parse_funcs))
+            else:
+                parsed = ()
+            result.append((func_name,parsed))
+        setattr(args, self.dest, result)
 
-    print()
-    print(f'Finding {item_name}...')
+class SelectorParse(FunctionFactoryParse):
 
-    results = Availabilities(item_name, item_id)
-    results.sort(key=sort_key, reverse=sort_reverse)
-    
-    table = tabulate(
-        [[result.store_name, result.format_quantity()] for result in results],
-        headers=['Store', item_name],
-        colalign=['left','right']
-    )
-    
-    print()
-    print(table)
-    print()
+    parse_actions = {
+        'state': [str],
+        'city': [str],
+        'distance': [float],
+        'available': [
+            BlodgieParse.string_to_product,
+            int
+        ],
+        'unavailable': [
+            BlodgieParse.string_to_product,
+            int
+        ],
+        'mode': [str]
+    }
+
+class SortKeyParse(FunctionFactoryParse):
+
+    parse_actions = {
+        'product': [
+            lambda x: int(x) if x.isdigit() else BlodgieParse.string_to_product(x),
+            BlodgieParse.string_to_bool
+        ],
+        'state': None,
+        'city': None,
+        'distance': [BlodgieParse.string_to_bool],
+    }
+
+
+parser = argparse.ArgumentParser(
+    prog=f'blodgie',
+    description=f'Where is Blodgie? {BOTTOM}{BOTTOM_HANDS}',
+)
+
+parser.add_argument('-p', '--products',
+    default=ALL,
+    action=ProductParse,
+    help='Products to display. Allowed values are ALL or a comma-separated list of products. Recognized products are: BLODGIE, SMOL_BLODGIE. (Default: ALL)'
+)
+
+parser.add_argument('-s', '--select',
+    default=None,
+    action=SelectorParse,
+    help='Options for filtering output. Argument must be a string containing a semicolon-separated list of commands, with each command of the form FUNCTION[:ARG1[:ARG2[...]]]'
+)
+
+'''
+Each consecutive command is ANDed or ORed the result of all preceding commands. Accepted commands include:
+state: show only stores in the given state. Arguments:
+    STATE: two-letter state postal abbreviation (case-insensitive)
+city: show only stores in the given city. Arguments: 
+    CITY: City name (case-insensitive)
+distance: Show only stores within a given radius of the starting location. Arguments: 
+    DISTANCE: Radius within which to query in miles
+available: Show only stores with more than the given quantity of product. Arguments:
+    PRODUCT: Name of a single product (allowed values: BLODGIE, SMOL_BLODGIE)
+    THRESHOLD: Only include stores with inventory STRICTLY GREATER THAN this number (optional; default 0)
+unavailable: Show only stores with less than the given quantity of product. Arguments:
+    PRODUCT: Name of a single product (allowed values: BLODGIE, SMOL_BLODGIE)
+    THRESHOLD: Only include stores with inventory LESS THAN OR EQUAL TO this number (optional; default 0)
+mode: Set the logical operator for combining consecutive commands; all subsequent commands will be combined using the given operator. Arguments:
+    OPERATOR: Logical operator to use; (allowed values: AND, OR)
+'''
+
+parser.add_argument('-o', '--order',
+    default=None,
+    action=SortKeyParse,
+    help='Options for sorting output. Argument must be a string containing a semicolon-separated list of commands, with each command of the form FUNCTION[:ARG1[:ARG2[...]]]'
+)
+
+'''
+Output is sorted by each command in the order received. Accepted commands include:
+state: Sort stores by state.
+city: Sort stores by city.
+distance: Sort stores by distance from the starting location. Arguments:
+    REVERSE: Whether to sort in ascending or descending order (true: furthest first; false: nearest first; optional; default false)
+product: sort stores by quantity of product. Arguments:
+    PRODUCT: Either an integer or the name of a single product. If integer, argument is interpreted as the index of the corresponding
+             product column. Otherwise, argument is the name of the product to sort by, with allowed values BLODGIE and SMOL_BLODGIE)
+    REVERSE: Whether to sort in ascending or descending order (true: lowest first; false: highest first; optional; default false)
+'''
+
+parser.add_argument('-l', '--location',
+    type=lambda s: tuple(map(float,s.split(','))),
+    default=(0,0),
+    help='Starting location to use when calculating distance to stores, as a comma-separated LATTITUDE,LONGITUDE pair. (Default: 0,0)'
+)
+
+parser.add_argument('-v', '--version', action='version', version='%(prog)s version 0.1312')
 
 def main():
 
-    find_all(('Blodgie', BLODGIE), ('Smol Blodgie', SMOL_BLODGIE))
+    args = parser.parse_args()
+
+    checker = InventoryChecker(location=args.location)
+
+    for product in args.products:
+        checker.check_product(product)
+
+    if args.select is not None:
+        for func_name, func_args in args.select:
+            getattr(checker.selector, func_name)(*func_args)
+
+    if args.order is not None:
+        for func_name, func_args in args.order:
+            getattr(checker.sort, func_name)(*func_args)
+
+    checker.show()
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
