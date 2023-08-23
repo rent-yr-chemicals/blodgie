@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python3
 
 import sys
 import sqlite3
@@ -7,6 +7,7 @@ import os.path
 import argparse
 import geopy.distance
 from collections import namedtuple
+from time import time
 
 import ikea_api as api
 from tabulate import tabulate
@@ -54,7 +55,9 @@ class InventoryTracker(object):
         self.cur = None
         self.lat = lat
         self.lng = lng
-        
+        self.time = None
+        self.new_session()
+
         need_initialize = not os.path.isfile(self.db_path) or self.db_path == ':memory:'
 
         self.connect()
@@ -98,6 +101,7 @@ class InventoryTracker(object):
             storeId TEXT NOT NULL,
             classUnitType TEXT,
             timestamp TEXT,
+            sessionTimestamp REAL,
             updateDateTime TEXT,
             quantity INTEGER,
             itemType TEXT,
@@ -117,6 +121,7 @@ class InventoryTracker(object):
             s.*,
             a.classUnitType,
             a.timestamp,
+            a.sessionTimestamp,
             a.updateDateTime,
             a.quantity,
             a.itemType,
@@ -146,11 +151,13 @@ class InventoryTracker(object):
             (SELECT * FROM results_detailed WHERE productName = "Smol Blodgie")
             AS s
         ON
-            b.storeId = s.storeId AND strftime("%Y-%m-%d %H:%M:%S", b.timestamp) = strftime("%Y-%m-%d %H:%M:%S", s.timestamp)
+            b.storeId = s.storeId AND b.sessionTimestamp = s.sessionTimestamp
         ;
 
         COMMIT;
         '''.format(CRY, CRY)
+
+        # CAST(strftime("%s", b.timestamp) AS INT) - CAST(strftime("%s", s.timestamp) AS INT) <= 2
 
         self.cur.executescript(cmd)
         self.con.commit()
@@ -205,6 +212,7 @@ class InventoryTracker(object):
                 store[('classUnitKey', 'classUnitCode')],
                 store[('classUnitKey', 'classUnitType')],
                 response['timestamp'],
+                self.time,
                 store[('buyingOption', 'cashCarry', 'availability', 'updateDateTime')],
                 store[('buyingOption', 'cashCarry', 'availability', 'quantity')] or 0,
                 store[('itemKey', 'itemType')],
@@ -212,8 +220,11 @@ class InventoryTracker(object):
             )
             stores.append(entry)
 
-        self.cur.executemany('INSERT INTO availabilities VALUES (?, ?, ?, ?, ?, ?, ?)', stores)
+        self.cur.executemany('INSERT INTO availabilities VALUES (?, ?, ?, ?, ?, ?, ?, ?)', stores)
         self.con.commit()
+
+    def new_session(self):
+        self.time = time()
 
     def columns(self, query=None, values=None):
 
@@ -264,6 +275,7 @@ def main():
     args = parser.parse_args()
     tracker = InventoryTracker(args.database, lat=args.lat, lng=args.lng)
     if args.update or args.database == ':memory:':
+        tracker.new_session()
         tracker.get_availability(BLODGIE.itemNo)
         tracker.get_availability(SMOL_BLODGIE.itemNo)
     if not args.quiet:
