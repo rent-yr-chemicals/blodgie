@@ -146,7 +146,7 @@ class InventoryTracker(object):
             (SELECT * FROM results_detailed WHERE productName = "Smol Blodgie")
             AS s
         ON
-            b.storeId = s.storeId AND strftime("%Y-%m-%d %H:%M:%S", b.timestamp) = strftime("%Y-%m-%d %H:%M:%S", s.timestamp);
+            b.storeId = s.storeId AND strftime("%Y-%m-%d %H:%M:%S", b.timestamp) = strftime("%Y-%m-%d %H:%M:%S", s.timestamp)
         ;
 
         COMMIT;
