@@ -8,6 +8,7 @@ def main():
         version='0.0',
         scripts=['blodgie'],
         install_requires=[
+            'requests',
             'ikea_api',
             'tabulate',
             'geopy'
