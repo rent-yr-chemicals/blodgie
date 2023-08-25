@@ -282,8 +282,9 @@ def main():
         tracker.print(args.query)
 
 parser = argparse.ArgumentParser(
-    prog=f'blodgie',
-    description=f'Where is Blodgie? {BOTTOM}{BOTTOM_HANDS}\n\nDefault behavior is equivalent to blodgie -d ":memory:" -q "SELECT * FROM results"',
+    prog='blodgie',
+    description=f'Where is Blodgie? {BOTTOM}{BOTTOM_HANDS}',
+    epilog='Default behavior: blodgie -d ":memory:" -q "SELECT * FROM results"'
 )
 
 parser.add_argument('-Q', '--quiet',
