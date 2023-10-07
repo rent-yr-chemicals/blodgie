@@ -57,36 +57,8 @@ class InventoryTracker(object):
         self.lat = lat
         self.lng = lng
         self.time = None
-        self.new_session()
-
-        need_initialize = not os.path.isfile(self.db_path) or self.db_path == ':memory:'
 
         self.connect()
-
-        if need_initialize:
-            self.initialize_db()
-
-        self.cur.execute('''
-            CREATE TEMPORARY TABLE results AS
-            SELECT
-                b.displayName AS Name,
-                b.city AS City,
-                b.stateProvinceCode AS State,
-                distance(b.lat, b.lng) AS Distance,
-                b.quantity AS Blodgie,
-                datetime(b.updateDateTime, "localtime") AS "Last Update (Blodgie)",
-                s.quantity AS "Smol Blodgie",
-                datetime(s.updateDateTime, "localtime") AS "Last Update (Smol Blodgie)",
-                b.sessionTimestamp AS sessionTimestamp
-            FROM 
-                (SELECT * FROM results_detailed WHERE productName = "Blodgie")
-                AS b
-            JOIN
-                (SELECT * FROM results_detailed WHERE productName = "Smol Blodgie")
-                AS s
-            ON
-                b.storeId = s.storeId AND b.sessionTimestamp = s.sessionTimestamp
-        ''')
 
     def __del__(self):
 
@@ -94,9 +66,16 @@ class InventoryTracker(object):
 
     def connect(self):
 
+        need_initialize = not os.path.isfile(self.db_path) or self.db_path == ':memory:'
+
         self.con = sqlite3.connect(self.db_path)
         self.cur = self.con.cursor()
         self.con.create_function('distance', 2, self.distance_function())
+
+        if need_initialize:
+            self.initialize_db()
+
+        self.new_session()
 
     def initialize_db(self):
 
@@ -138,24 +117,6 @@ class InventoryTracker(object):
                 productNameAlternate TEXT,
                 description TEXT
             );
-
-            CREATE VIEW results_detailed AS
-            SELECT
-                s.*,
-                a.classUnitType,
-                a.requestTimestamp,
-                a.sessionTimestamp,
-                a.updateDateTime,
-                a.quantity,
-                a.itemType,
-                p.*
-            FROM
-                stores AS s
-                JOIN availabilities AS a
-                    ON s.storeId = a.storeId
-                JOIN products AS p
-                    ON p.itemNo = a.itemNo
-            ;
 
             COMMIT;
         '''
@@ -227,6 +188,57 @@ class InventoryTracker(object):
     def new_session(self):
         self.time = datetime.datetime.now().isoformat()
 
+    def update_results(self):
+
+        cmd = '''
+            BEGIN;
+
+            CREATE TEMPORARY TABLE results_detailed AS
+            SELECT
+                s.*,
+                a.classUnitType,
+                a.requestTimestamp,
+                a.sessionTimestamp,
+                a.updateDateTime,
+                a.quantity,
+                a.itemType,
+                p.*
+            FROM
+                stores AS s
+                JOIN availabilities AS a
+                    ON s.storeId = a.storeId
+                JOIN products AS p
+                    ON p.itemNo = a.itemNo
+            ;
+
+            CREATE TEMPORARY TABLE results AS
+            SELECT
+                b.displayName AS Name,
+                b.city AS City,
+                b.stateProvinceCode AS State,
+                distance(b.lat, b.lng) AS Distance,
+                b.quantity AS Blodgie,
+                datetime(b.updateDateTime, "localtime") AS "Last Update (Blodgie)",
+                s.quantity AS "Smol Blodgie",
+                datetime(s.updateDateTime, "localtime") AS "Last Update (Smol Blodgie)",
+                datetime(b.sessionTimestamp) AS sessionTimestamp
+            FROM 
+                (SELECT * FROM results_detailed WHERE productName = "Blodgie")
+                AS b
+            JOIN
+                (SELECT * FROM results_detailed WHERE productName = "Smol Blodgie")
+                AS s
+            ON
+                b.storeId = s.storeId AND b.sessionTimestamp = s.sessionTimestamp
+            ;
+
+            COMMIT;
+        '''
+
+        self.cur.executescript(cmd)
+        self.con.commit()
+
+
     def columns(self, query=None, values=None):
 
         if query is not None:
@@ -276,10 +288,10 @@ def main():
     args = parser.parse_args()
     tracker = InventoryTracker(args.database, lat=args.lat, lng=args.lng)
     if args.update or args.database == ':memory:':
-        tracker.new_session()
         tracker.get_availability(BLODGIE.itemNo)
         tracker.get_availability(SMOL_BLODGIE.itemNo)
     if not args.quiet:
+        tracker.update_results()
         tracker.print(args.query)
 
 parser = argparse.ArgumentParser(
